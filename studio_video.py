@@ -50,72 +50,54 @@ def _get_detector():
 def _detect_on_frame(detector, frame) -> List[FaceBox]:
     """
     단일 프레임에서 얼굴을 탐지해서 FaceBox 리스트로 반환하는 함수이다.
-    detect_faces_yolov5 반환 형식에 따라 x1,y1,x2,y2 또는 x,y,w,h 를 처리한다.
+    studio_image.py 의 로직과 최대한 동일하게 맞춘 버전이다.
     """
-    
     h, w = frame.shape[:2]
-    boxes: List[FaceBox] = []
-
-    # 🔥 여기가 핵심 수정 부분이다.
-    # 1차로는 3번째 인자를 포지셔널로 넣어보고,
-    # TypeError가 나면 2인자 버전으로 다시 시도한다.
-    try:
-        detections = detect_faces_yolov5(detector, frame, DETECT_THUMB_W)
-    except TypeError:
-        detections = detect_faces_yolov5(detector, frame)
-
     faces: List[FaceBox] = []
-    for (x, y, w, h) in detections:
-        faces.append(FaceBox(x=x, y=y, w=w, h=h))
+
+    # YOLO 모델이 없으면 바로 리턴
+    if detector is None:
+        print("[VIDEO_DETECT] detector is None", flush=True)
+        return faces
+
+    # ------------ 1단계: 리사이즈 (너무 큰 영상일 때) ------------
+    if w > DETECT_THUMB_W:
+        scale = DETECT_THUMB_W / float(w)
+        small = cv2.resize(
+            frame,
+            (max(1, int(w * scale)), max(1, int(h * scale)))
+        )
+    else:
+        scale = 1.0
+        small = frame
+
+    # ------------ 2단계: YOLO로 얼굴 박스 얻기 ------------
+    try:
+        # conf_thres 기본값(0.4)을 사용한다.
+        rects_small = detect_faces_yolov5(detector, small)
+    except Exception as e:
+        print(f"[VIDEO_DETECT] YOLO detect 실패: {e}", flush=True)
+        rects_small = []
+
+    pad = float(FACE_PAD)
+
+    # ------------ 3단계: 원본 해상도로 좌표 되돌리기 + 패딩 적용 ------------
+    for (x, y, w0, h0) in rects_small:
+        # 리사이즈했으면 원래 좌표로 복구
+        if scale != 1.0:
+            x, y, w0, h0 = int(x / scale), int(y / scale), int(w0 / scale), int(h0 / scale)
+
+        # core.expand_box 를 이용해 약간 확장된 박스 계산
+        ex, ey, ew, eh = expand_box(x, y, w0, h0, pad, pad, w, h)
+
+        # 너무 작은 박스는 무시
+        if ew >= 12 and eh >= 12:
+            faces.append(FaceBox(ex, ey, ew, eh))
 
     print(f"[VIDEO_DETECT] faces={len(faces)}", flush=True)
-
     return faces
 
-    if detections is None:
-        return boxes
-
-    for det in detections:
-        # det 형식이 [x1, y1, x2, y2, (score...)] 이거나 [x, y, w, h] 라고 가정한다.
-        if len(det) >= 4:
-            x1, y1, x2, y2 = det[0], det[1], det[2], det[3]
-
-            # 혹시 (x, y, w, h) 형식이면 x2,y2 변환
-            if x2 <= 1.0 and y2 <= 1.0:
-                # 0~1 정규화 좌표라고 가정
-                x1 = int(x1 * w)
-                y1 = int(y1 * h)
-                x2 = int(x2 * w)
-                y2 = int(y2 * h)
-            elif x2 < w and y2 < h and x2 - x1 > 0 and y2 - y1 > 0:
-                # 이미 픽셀 좌표라고 보고 그대로 사용한다.
-                x1 = int(x1)
-                y1 = int(y1)
-                x2 = int(x2)
-                y2 = int(y2)
-            else:
-                # 다른 형식이면 (x, y, w, h)라고 보고 처리한다.
-                x = int(det[0])
-                y = int(det[1])
-                ww = int(det[2])
-                hh = int(det[3])
-                x1, y1, x2, y2 = x, y, x + ww, y + hh
-
-            x1 = max(0, min(w - 1, x1))
-            y1 = max(0, min(h - 1, y1))
-            x2 = max(0, min(w, x2))
-            y2 = max(0, min(h, y2))
-            bw = max(0, x2 - x1)
-            bh = max(0, y2 - y1)
-
-            if bw <= 0 or bh <= 0:
-                continue
-
-            boxes.append(FaceBox(x=x1, y=y1, w=bw, h=bh))
-
-    return boxes
-
-
+  
 
 def _crop_face_with_pad(frame, box: FaceBox) -> Optional[np.ndarray]:
     """
